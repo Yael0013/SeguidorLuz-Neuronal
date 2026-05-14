@@ -2,6 +2,7 @@ using UnityEngine;
 using System.IO.Ports;
 using Unity.InferenceEngine;
 using TMPro;
+using UnityEngine.UI; // NUEVO: Necesario para controlar el Botón
 
 public class ControlNeuronal : MonoBehaviour
 {
@@ -9,22 +10,21 @@ public class ControlNeuronal : MonoBehaviour
     public ModelAsset modeloONNX; 
     private Worker motorInferencia;
 
-    [Header("Configuración Serial")]
+    [Header("Configuración Serial (Por defecto)")]
     public string puertoNombre = "COM7";
     private SerialPort puertoSerie;
 
     [Header("UI y Debug")]
+    public TMP_InputField inputPuertoUI; // NUEVO: La caja de texto para escribir el COM
+    public Button botonConectarUI;       // NUEVO: El botón para iniciar
     public TMP_Text textoLDR1;
     public TMP_Text textoLDR2;
     public TMP_Text textoDecision;
 
-    [Header("Estabilización de Control (NUEVO)")]
-    [Tooltip("Qué tan suave se mueve (0.01 muy lento, 1.0 sin filtro)")]
+    [Header("Estabilización de Control")]
     public float factorSuavizado = 0.1f;
-    [Tooltip("Cambio mínimo para mover el motor (Evita micro-saltos)")]
     public float umbralCambio = 0.03f;
 
-    // Variables internas para la memoria del filtro
     private float decisionSuavizada = 0f;
     private float ultimaDecisionEnviada = -999f;
 
@@ -33,13 +33,55 @@ public class ControlNeuronal : MonoBehaviour
         Model modeloCargado = ModelLoader.Load(modeloONNX);
         motorInferencia = new Worker(modeloCargado, BackendType.GPUCompute);
 
+        // 1. Mostrar el puerto del Inspector en la caja de texto visual al iniciar
+        if (inputPuertoUI != null)
+        {
+            inputPuertoUI.text = puertoNombre;
+        }
+
+        // 2. Conectar la función de encendido al botón por código
+        if (botonConectarUI != null)
+        {
+            botonConectarUI.onClick.AddListener(ConectarSerial);
+        }
+        
+        // ¡Se eliminó la apertura automática del puerto de aquí!
+    }
+
+    // NUEVO: Esta función solo se ejecuta al darle clic al botón
+    public void ConectarSerial()
+    {
+        // Evitar que el usuario presione el botón dos veces por accidente
+        if (puertoSerie != null && puertoSerie.IsOpen) return;
+
+        // Leer lo que el usuario escribió en la interfaz
+        if (inputPuertoUI != null && !string.IsNullOrEmpty(inputPuertoUI.text))
+        {
+            // .ToUpper() asegura que si escriben "com7", se corrija a "COM7"
+            puertoNombre = inputPuertoUI.text.ToUpper(); 
+        }
+
         puertoSerie = new SerialPort(puertoNombre, 115200);
         puertoSerie.ReadTimeout = 20;
-        try { puertoSerie.Open(); } catch { }
+
+        try 
+        { 
+            puertoSerie.Open(); 
+            Debug.Log($"Conectado exitosamente al puerto: {puertoNombre}");
+            
+            // UX: Desactivar el botón y el input para indicar que ya se conectó
+            botonConectarUI.interactable = false;
+            inputPuertoUI.interactable = false;
+        } 
+        catch (System.Exception e)
+        { 
+            Debug.LogError($"Error al abrir puerto {puertoNombre}: " + e.Message); 
+        }
     }
 
     void Update()
     {
+        // El código interno se protege: Si el puerto no está abierto, ignora el Update
         if (puertoSerie != null && puertoSerie.IsOpen)
         {
             try
@@ -62,16 +104,9 @@ public class ControlNeuronal : MonoBehaviour
                     using var cpuOutput = outputTensor.ReadbackAndClone();
                     float decisionBruta = cpuOutput[0];
 
-                    // --- 1. FILTRO PASA BAJAS (Interpolación Lineal) ---
-                    // Esto promedia la lectura nueva con las lecturas anteriores. 
-                    // Elimina los picos erráticos de ruido eléctrico.
                     decisionSuavizada = Mathf.Lerp(decisionSuavizada, decisionBruta, factorSuavizado);
-
                     textoDecision.text = $"Decisión Neurona: {decisionSuavizada:F2}";
 
-                    // --- 2. BANDA MUERTA (Deadband) ---
-                    // Solo "despertamos" al puerto serial si el cambio matemático 
-                    // es lo suficientemente grande como para justificar un movimiento físico.
                     if (Mathf.Abs(decisionSuavizada - ultimaDecisionEnviada) > umbralCambio)
                     {
                         puertoSerie.Write(decisionSuavizada.ToString("F2") + "\n");
